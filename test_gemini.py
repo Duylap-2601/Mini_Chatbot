@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import os
 import sys
+import time
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -69,9 +70,12 @@ DEMO_QUESTIONS = [
 
 
 def run_demo(client: GeminiRAGClient) -> None:
-    """Run the 5 pre-built questions automatically (non-interactive demo)."""
-    print("\n[DEMO MODE] Running 5 sample questions...\n")
+    """Run the pre-built questions automatically (non-interactive demo)."""
+    print("\n[DEMO MODE] Running sample questions with rate-limiting delay...\n")
     for i, question in enumerate(DEMO_QUESTIONS, 1):
+        if i > 1:
+            print("Waiting 4 seconds to respect rate limits...")
+            time.sleep(4)
         print(f"Q{i}: {question}")
         print("-" * 60)
         answer = client.ask(question)
