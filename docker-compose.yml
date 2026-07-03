@@ -1,0 +1,15 @@
+version: "3.9"
+
+services:
+  optibot-sync:
+    build: .
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - OPENAI_VECTOR_STORE_ID=${OPENAI_VECTOR_STORE_ID}
+      - OPENAI_ASSISTANT_ID=${OPENAI_ASSISTANT_ID}
+    volumes:
+      # Persist state between runs so delta detection works
+      - ./state:/app/state
+      - ./logs:/app/logs
+      - ./articles:/app/articles
+    restart: "no"   # Run once and exit (managed by external scheduler)
