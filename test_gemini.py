@@ -113,7 +113,12 @@ def run_interactive(client: GeminiRAGClient) -> None:
             answer = client.ask(user_input)
             print(answer)
         except Exception as exc:
-            print(f"[ERROR] {exc}")
+            exc_str = str(exc)
+            if "429" in exc_str or "RESOURCE_EXHAUSTED" in exc_str:
+                print("\n[Rate Limit] Bạn đang bị giới hạn tần suất gọi API của Gemini Free Tier (15 requests/phút).")
+                print("Vui lòng đợi khoảng 10-15 giây rồi gõ lại câu hỏi.")
+            else:
+                print(f"[ERROR] {exc}")
         print()
 
 
