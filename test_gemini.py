@@ -64,6 +64,7 @@ DEMO_QUESTIONS = [
     "What file formats does OptiSigns support for media upload?",
     "How do I create a playlist in OptiSigns?",
     "How do I set up a Canva integration with OptiSigns?",
+    "How do I add a YouTube video?",
 ]
 
 

@@ -1,14 +1,16 @@
 """
-main.py — Orchestrator: Scrape OptiSigns Help Center → Upload delta to OpenAI Vector Store.
+main.py — Orchestrator: Scrape OptiSigns Help Center → Sync to AI Assistant.
 
-Usage:
-    python main.py
+Supports:
+  1. Google Gemini (Free tier) — Runs when GOOGLE_API_KEY or an AIza... API_KEY is set.
+  2. OpenAI Assistants API — Runs when OPENAI_API_KEY or a sk-... API_KEY is set.
 
-Environment variables (see .env.sample):
-    OPENAI_API_KEY
-    OPENAI_VECTOR_STORE_ID
-    OPENAI_ASSISTANT_ID  (optional, for logging)
+Automatic detection of key format:
+  - starts with "sk-": OpenAI
+  - starts with "AIza": Google Gemini
 """
+
+from __future__ import annotations
 
 import os
 import sys
@@ -21,14 +23,19 @@ from dotenv import load_dotenv
 # Load .env before importing project modules
 load_dotenv()
 
-from scraper.zendesk_client import fetch_all_articles
-from scraper.markdown_converter import save_articles
-from vector_store.delta_tracker import DeltaTracker
-from vector_store.openai_client import VectorStoreClient
+# Configure environment fallback for "API_KEY" as specified in recruiting guidelines
+generic_api_key = os.getenv("API_KEY")
+if generic_api_key:
+    if generic_api_key.startswith("sk-"):
+        os.environ["OPENAI_API_KEY"] = generic_api_key
+    elif generic_api_key.startswith("AIza"):
+        os.environ["GOOGLE_API_KEY"] = generic_api_key
+    else:
+        # If unknown, set both just in case
+        os.environ["OPENAI_API_KEY"] = generic_api_key
+        os.environ["GOOGLE_API_KEY"] = generic_api_key
 
-# ---------------------------------------------------------------------------
-# Logging setup — writes to both stdout and logs/run_<timestamp>.log
-# ---------------------------------------------------------------------------
+# Setup logging — writes to both stdout and logs/run_<timestamp>.log
 LOG_DIR = Path("logs")
 LOG_DIR.mkdir(exist_ok=True)
 
@@ -46,74 +53,36 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Project imports
+from scraper.zendesk_client import fetch_all_articles
+from scraper.markdown_converter import save_articles
+from vector_store.delta_tracker import DeltaTracker
 
 # ---------------------------------------------------------------------------
-# Config validation
+# Pipeline 1: Google Gemini (Context stuffing + local keyword ranking RAG)
 # ---------------------------------------------------------------------------
-def get_config() -> dict:
-    required = ["OPENAI_API_KEY", "OPENAI_VECTOR_STORE_ID"]
-    config = {}
-    missing = []
-
-    for key in required:
-        val = os.getenv(key)
-        if not val or val.startswith("sk-...") or val.startswith("vs_..."):
-            missing.append(key)
-        config[key] = val
-
-    if missing:
-        logger.error(f"Missing required environment variables: {', '.join(missing)}")
-        logger.error("Copy .env.sample → .env and fill in your credentials.")
-        sys.exit(1)
-
-    return config
-
-
-# ---------------------------------------------------------------------------
-# Main pipeline
-# ---------------------------------------------------------------------------
-def run_pipeline(config: dict) -> dict:
+def run_gemini_pipeline() -> dict:
+    logger.info("Executing pipeline: GOOGLE GEMINI (Local Delta Sync)")
     stats = {"added": 0, "updated": 0, "skipped": 0, "errors": 0}
 
-    # ── Step 1: Scrape ──────────────────────────────────────────────────────
+    # 1. Scrape
     logger.info("=" * 60)
     logger.info("STEP 1 — Scraping OptiSigns Help Center articles")
     logger.info("=" * 60)
-
     articles = fetch_all_articles()
+    logger.info("Fetched %d articles", len(articles))
 
-    if len(articles) < 30:
-        logger.warning(f"Only fetched {len(articles)} articles — expected >=30!")
-    else:
-        logger.info(f"Fetched {len(articles)} articles [OK]")
-
-    # ── Step 2: Convert to Markdown ─────────────────────────────────────────
+    # 2. Convert to Markdown
     logger.info("\nConverting articles to Markdown...")
     saved = save_articles(articles, output_dir=Path("articles"))
-    logger.info(f"Converted {len(saved)} articles to Markdown [OK]")
+    logger.info("Converted %d articles to Markdown [OK]", len(saved))
 
-    # ── Step 3: Delta detection + upload ────────────────────────────────────
+    # 3. Delta tracking (local hashes)
     logger.info("\n" + "=" * 60)
-    logger.info("STEP 2 — Uploading delta to OpenAI Vector Store")
+    logger.info("STEP 2 — Calculating Delta and Updating State")
     logger.info("=" * 60)
 
-    tracker = DeltaTracker(Path("state/hashes.json"))
-    vs_client = VectorStoreClient(
-        api_key=config["OPENAI_API_KEY"],
-        vector_store_id=config["OPENAI_VECTOR_STORE_ID"],
-    )
-
-    # Print vector store status
-    try:
-        info = vs_client.get_vector_store_info()
-        logger.info(f"Vector Store: {info['name']} ({info['id']})")
-        logger.info(f"  Current file counts: {info['file_counts']}")
-    except Exception as e:
-        logger.warning(f"Could not fetch vector store info: {e}")
-
-    # Process each saved article to classify action
-    to_add = []      # list of (slug, filepath, content, updated_at)
-    to_update = []   # list of (slug, filepath, content, updated_at, old_file_id)
+    tracker = DeltaTracker(Path("state/hashes_gemini.json"))
     current_slugs = set()
 
     for article_info in saved:
@@ -128,7 +97,87 @@ def run_pipeline(config: dict) -> dict:
 
             if action == "skip":
                 stats["skipped"] += 1
-                logger.debug(f"  [SKIP]    {slug}")
+                continue
+            elif action == "add":
+                tracker.record(slug, content, file_id="local", updated_at=updated_at)
+                logger.info("  [ADD]    %s", slug)
+                stats["added"] += 1
+            elif action == "update":
+                tracker.record(slug, content, file_id="local", updated_at=updated_at)
+                logger.info("  [UPDATE] %s", slug)
+                stats["updated"] += 1
+        except Exception as exc:
+            logger.error("  [ERROR]  Failed to process %s: %s", slug, exc)
+            stats["errors"] += 1
+
+    # Remove deleted articles
+    for tracked_slug in tracker.all_slugs():
+        if tracked_slug not in current_slugs:
+            logger.info("  [DELETE] %s (no longer exists)", tracked_slug)
+            tracker.remove(tracked_slug)
+            
+    tracker.save()
+    return stats
+
+# ---------------------------------------------------------------------------
+# Pipeline 2: OpenAI (Cloud Assistants API + Vector Store)
+# ---------------------------------------------------------------------------
+def run_openai_pipeline() -> dict:
+    logger.info("Executing pipeline: OPENAI ASSISTANTS (Cloud Vector Store Sync)")
+    from vector_store.openai_client import VectorStoreClient
+    
+    openai_key = os.getenv("OPENAI_API_KEY")
+    vs_id = os.getenv("OPENAI_VECTOR_STORE_ID")
+
+    if not openai_key or not vs_id:
+        logger.error("Missing required env: OPENAI_API_KEY and OPENAI_VECTOR_STORE_ID must be set.")
+        sys.exit(1)
+
+    stats = {"added": 0, "updated": 0, "skipped": 0, "errors": 0}
+
+    # 1. Scrape
+    logger.info("=" * 60)
+    logger.info("STEP 1 — Scraping OptiSigns Help Center articles")
+    logger.info("=" * 60)
+    articles = fetch_all_articles()
+    logger.info("Fetched %d articles", len(articles))
+
+    # 2. Convert to Markdown
+    logger.info("\nConverting articles to Markdown...")
+    saved = save_articles(articles, output_dir=Path("articles"))
+    logger.info("Converted %d articles to Markdown [OK]", len(saved))
+
+    # 3. Delta detection + upload
+    logger.info("\n" + "=" * 60)
+    logger.info("STEP 2 — Uploading delta to OpenAI Vector Store")
+    logger.info("=" * 60)
+
+    tracker = DeltaTracker(Path("state/hashes.json"))
+    vs_client = VectorStoreClient(api_key=openai_key, vector_store_id=vs_id)
+
+    try:
+        info = vs_client.get_vector_store_info()
+        logger.info("Vector Store: %s (%s)", info["name"], info["id"])
+        logger.info("  Current file counts: %s", info["file_counts"])
+    except Exception as e:
+        logger.warning("Could not fetch vector store info: %s", e)
+
+    to_add = []
+    to_update = []
+    current_slugs = set()
+
+    for article_info in saved:
+        slug = article_info["slug"]
+        filepath = Path(article_info["path"])
+        updated_at = article_info["updated_at"]
+        current_slugs.add(slug)
+
+        try:
+            content = filepath.read_text(encoding="utf-8")
+            action = tracker.classify(slug, content)
+
+            if action == "skip":
+                stats["skipped"] += 1
                 continue
             elif action == "add":
                 to_add.append((slug, filepath, content, updated_at))
@@ -136,39 +185,37 @@ def run_pipeline(config: dict) -> dict:
                 old_file_id = tracker.get_file_id(slug)
                 to_update.append((slug, filepath, content, updated_at, old_file_id))
         except Exception as e:
-            logger.error(f"  [ERROR]   Failed to classify {slug}: {e}")
+            logger.error("  [ERROR]   Failed to classify %s: %s", slug, e)
             stats["errors"] += 1
 
-    # Print summary of pending actions
-    logger.info(f"Classified: {len(to_add)} additions, {len(to_update)} updates, {stats['skipped']} skips.")
+    logger.info("Classified: %d additions, %d updates, %d skips.", len(to_add), len(to_update), stats["skipped"])
 
-    # 1. Clean up old files for updates
+    # Detach and delete old files
     old_file_ids = [item[4] for item in to_update if item[4]]
     if old_file_ids:
         try:
             vs_client.detach_and_delete_old_files(old_file_ids)
         except Exception as e:
-            logger.warning(f"Error during cleanup of old files: {e}")
+            logger.warning("Error cleaning up old files: %s", e)
 
-    # 2. Upload new/updated files in parallel
+    # Parallel upload
     paths_to_upload = [item[1] for item in to_add] + [item[1] for item in to_update]
     uploaded_files_map = {}
     if paths_to_upload:
         try:
             uploaded_files_map = vs_client.upload_files_parallel(paths_to_upload)
         except Exception as e:
-            logger.error(f"Error uploading files: {e}")
+            logger.error("Error uploading files: %s", e)
             stats["errors"] += len(paths_to_upload)
             tracker.save()
             return stats
 
-    # 3. Attach all uploaded file IDs to vector store in a batch
+    # Attach in batch
     uploaded_file_ids = list(uploaded_files_map.values())
     if uploaded_file_ids:
         try:
             vs_client.attach_files_batch(uploaded_file_ids)
             
-            # 4. If batch attachment succeeded, record everything in state
             # Record additions
             for slug, filepath, content, updated_at in to_add:
                 file_id = uploaded_files_map.get(filepath)
@@ -187,25 +234,45 @@ def run_pipeline(config: dict) -> dict:
                 else:
                     stats["errors"] += 1
         except Exception as e:
-            logger.error(f"Error indexing files in Vector Store: {e}")
+            logger.error("Error indexing files in Vector Store: %s", e)
             stats["errors"] += len(uploaded_file_ids)
 
-    # ── Step 4: Save state ──────────────────────────────────────────────────
-    tracker.save()
+    # Remove deleted articles from state and OpenAI Vector Store
+    for tracked_slug in tracker.all_slugs():
+        if tracked_slug not in current_slugs:
+            old_file_id = tracker.get_file_id(tracked_slug)
+            if old_file_id:
+                logger.info("  [DELETE] %s from OpenAI Vector Store", tracked_slug)
+                try:
+                    vs_client.detach_from_vector_store(old_file_id)
+                    vs_client.delete_file(old_file_id)
+                except Exception as e:
+                    logger.warning("Error detaching deleted file: %s", e)
+            tracker.remove(tracked_slug)
 
+    tracker.save()
     return stats
 
-
 # ---------------------------------------------------------------------------
-# Entry point
+# Main Orchestrator Entry Point
 # ---------------------------------------------------------------------------
 def main():
     run_start = datetime.now(timezone.utc)
-    logger.info(f"OptiBot Sync Job started at {run_start.isoformat()}")
-    logger.info(f"Log file: {log_file.resolve()}")
+    logger.info("OptiBot Sync Job started at %s", run_start.isoformat())
+    logger.info("Log file: %s", log_file.resolve())
 
-    config = get_config()
-    stats = run_pipeline(config)
+    # Detect which API key is present
+    google_key = os.getenv("GOOGLE_API_KEY")
+    openai_key = os.getenv("OPENAI_API_KEY")
+
+    if google_key:
+        stats = run_gemini_pipeline()
+    elif openai_key:
+        stats = run_openai_pipeline()
+    else:
+        logger.error("ERROR: Neither GOOGLE_API_KEY nor OPENAI_API_KEY (or API_KEY) is set.")
+        logger.error("Please configure environment variables.")
+        sys.exit(1)
 
     run_end = datetime.now(timezone.utc)
     duration = (run_end - run_start).total_seconds()
@@ -213,16 +280,15 @@ def main():
     logger.info("\n" + "=" * 60)
     logger.info("SYNC COMPLETE")
     logger.info("=" * 60)
-    logger.info(f"  [ADD] Added:   {stats['added']}")
-    logger.info(f"  [UPDATE] Updated: {stats['updated']}")
-    logger.info(f"  [SKIP] Skipped: {stats['skipped']}")
-    logger.info(f"  [ERROR] Errors:  {stats['errors']}")
-    logger.info(f"  Duration: {duration:.1f}s")
-    logger.info(f"  Log: {log_file.resolve()}")
+    logger.info("  [ADD] Added:      %d", stats["added"])
+    logger.info("  [UPDATE] Updated:    %d", stats["updated"])
+    logger.info("  [SKIP] Skipped:    %d", stats["skipped"])
+    logger.info("  [ERROR] Errors:     %d", stats["errors"])
+    logger.info("  Duration:          %.1f seconds", duration)
+    logger.info("  Log:               %s", log_file.resolve())
 
     if stats["errors"] > 0:
         sys.exit(1)
-
 
 if __name__ == "__main__":
     main()
