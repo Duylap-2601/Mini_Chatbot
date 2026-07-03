@@ -74,7 +74,8 @@ docker run --env-file .env \
 ```
 
 ### Triển khai tự động hàng ngày trên Railway
-Ứng dụng được thiết lập chạy định kỳ lúc **02:00 UTC** hàng ngày trên [Railway](https://railway.app):
+Ứng dụng được thiết lập chạy định kỳ lúc **02:00 UTC** hàng ngày. 
+- **Đường dẫn xem Logs chạy thực tế (Daily Job Logs):** [Xem Logs trên Railway](https://railway.com/project/0b720fe3-5d5c-413b-90a5-1ccc5e3b7e99/service/0393b025-f1dc-474a-b06c-f1e0df54292e)
 1. Kết nối Repository GitHub này vào dự án Railway của bạn.
 2. Thiết lập biến môi trường trên Railway Dashboard:
    - `GOOGLE_API_KEY` = Khóa API Gemini của bạn.
