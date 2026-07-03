@@ -1,198 +1,105 @@
-# OptiBot Support Sync
+# OptiBot Support Sync — Google AI Studio (Gemini)
 
-An automated pipeline that scrapes the OptiSigns Help Center, converts articles to Markdown, and syncs them into an OpenAI Vector Store to power a RAG-based customer support assistant.
+Một hệ thống tự động cào bài viết (scrape) từ Help Center của OptiSigns, chuyển đổi sang Markdown sạch sẽ và tích hợp RAG (Retrieval-Augmented Generation) thông qua Google Gemini 2.5 Flash trên Google AI Studio.
 
----
-
-## Architecture
-
-```
-Zendesk API  →  Markdown files  →  OpenAI Vector Store  →  OptiBot Assistant
-     ↑                                      ↑
-  Daily cron (Railway)          Delta detection (SHA-256 hash)
-```
+Hệ thống được thiết kế tối ưu cho **Free Tier của Google AI Studio** bằng cách xếp hạng tài liệu cục bộ để tránh bị chạm giới hạn quota 250k tokens/phút.
 
 ---
 
-## Quick Start
+## Kiến trúc hệ thống (RAG)
 
-### 1. Prerequisites
+```
+Zendesk API  ──(Daily Sync)──>  Thư mục Articles (.md) + Delta Tracker (hashes_gemini.json)
+                                         ↓
+User Query  ──>  Xếp hạng từ khóa cục bộ (Chọn 15 bài phù hợp nhất)
+                                         ↓
+Context (Prompt)  ──>  Google Gemini 2.5 Flash  ──>  Câu trả lời (+ Trích dẫn)
+```
 
+---
+
+## Bắt đầu nhanh (Quick Start)
+
+### 1. Chuẩn bị
 - Python 3.11+
-- Docker (optional, for containerised runs)
-- An OpenAI API key with Assistants API access → [platform.openai.com](https://platform.openai.com)
+- Một API key miễn phí từ Google AI Studio → [aistudio.google.com/app/apikey](https://aistudio.google.com/app/apikey)
 
-### 2. Clone & install
-
+### 2. Cài đặt thư viện
 ```bash
-git clone https://github.com/<your-username>/optibot-support-sync
-cd optibot-support-sync
-pip install -r requirements.txt
+git clone https://github.com/Duylap-2601/Mini_Chatbot.git
+cd Mini_Chatbot
+pip install -r requirements_gemini.txt
 ```
 
-### 3. Configure environment
-
+### 3. Cấu hình môi trường
+Copy file mẫu cấu hình `.env.sample` thành `.env`:
 ```bash
 cp .env.sample .env
-# Edit .env and set OPENAI_API_KEY=sk-...
+```
+Mở file `.env` và điền khóa của bạn:
+```env
+GOOGLE_API_KEY=AIzaSy...your_gemini_key_here...
 ```
 
-### 4. One-time setup — create Assistant & Vector Store
-
+### 4. Đồng bộ dữ liệu lần đầu (Sync Pipeline)
+Chạy script để tải toàn bộ bài viết từ Help Center về local máy:
 ```bash
-python setup_assistant.py
+python main_gemini.py
 ```
+- **Lần chạy đầu tiên:** Tải toàn bộ 404 bài viết, chuyển sang Markdown và lưu vào thư mục `articles/`.
+- **Các lần chạy sau:** Chỉ cập nhật/thêm các bài viết có thay đổi nội dung (sử dụng hash SHA-256 để so sánh delta).
 
-Copy the printed `OPENAI_ASSISTANT_ID` and `OPENAI_VECTOR_STORE_ID` into your `.env` file.
-
-### 5. Run the sync pipeline
-
+### 5. Chạy thử trợ lý (Test CLI)
+Chạy demo tự động kiểm tra 5 câu hỏi mẫu của hệ thống:
 ```bash
-python main.py
+python test_gemini.py --demo
 ```
-
-**First run:** scrapes all articles, uploads everything, logs `Added: N`.  
-**Subsequent runs:** only uploads changed/new articles, logs `Added: X | Updated: Y | Skipped: Z`.
+Hoặc chạy chế độ chat trực tiếp (Interactive Mode):
+```bash
+python test_gemini.py
+```
 
 ---
 
-## Running with Docker
+## Triển khai Docker (Railway)
 
-### Build & run once
-
+### Chạy bằng Docker cục bộ
+Build và chạy một lần:
 ```bash
-docker build -t optibot-sync .
+docker build -t optibot-sync-gemini -f Dockerfile .
 docker run --env-file .env \
            -v $(pwd)/state:/app/state \
            -v $(pwd)/logs:/app/logs \
-           optibot-sync
+           optibot-sync-gemini
 ```
 
-Or with explicit API key:
-
-```bash
-docker run \
-  -e OPENAI_API_KEY=sk-... \
-  -e OPENAI_VECTOR_STORE_ID=vs-... \
-  -v $(pwd)/state:/app/state \
-  -v $(pwd)/logs:/app/logs \
-  optibot-sync
-```
-
-Exits with **code 0** on success, **code 1** if any upload errors occurred.
-
-### Using docker-compose
-
-```bash
-docker-compose up --build
-```
+### Triển khai tự động hàng ngày trên Railway
+Ứng dụng được thiết lập chạy định kỳ lúc **02:00 UTC** hàng ngày trên [Railway](https://railway.app):
+1. Kết nối Repository GitHub này vào dự án Railway của bạn.
+2. Thiết lập biến môi trường trên Railway Dashboard:
+   - `GOOGLE_API_KEY` = Khóa API Gemini của bạn.
+   - `ZENDESK_BASE_URL` = `https://support.optisigns.com`
+   - `ARTICLES_DIR` = `articles`
+3. Cấu hình lịch chạy tự động (cronjob) đã được cài đặt sẵn qua file `railway.json`: `0 2 * * *`.
 
 ---
 
-## Project Structure
+## Chi tiết Cơ chế Tìm kiếm Lọc (Hybrid Retrieval)
 
-```
-optibot-support-sync/
-├── scraper/
-│   ├── zendesk_client.py      # Fetch articles from Zendesk Help Center API
-│   └── markdown_converter.py  # Convert HTML → clean Markdown + frontmatter
-├── vector_store/
-│   ├── openai_client.py       # Upload/delete files via OpenAI API (no UI)
-│   └── delta_tracker.py       # SHA-256 hash-based change detection
-├── state/
-│   └── hashes.json            # Persisted state (gitignored)
-├── articles/                  # Scraped Markdown files (gitignored)
-├── logs/                      # Run logs (gitignored)
-├── main.py                    # Orchestrator
-├── setup_assistant.py         # One-time Assistant + Vector Store creation
-├── Dockerfile
-├── docker-compose.yml
-├── requirements.txt
-└── .env.sample
-```
+Vì Gemini Free Tier giới hạn **250,000 tokens/phút**, việc nhồi toàn bộ 404 bài viết (~500,000 tokens) vào prompt trong mỗi lượt hỏi sẽ ngay lập tức gây lỗi quá tải quota (`RESOURCE_EXHAUSTED`).
+
+Để khắc phục, OptiBot sử dụng thuật toán tìm kiếm từ khóa cục bộ siêu nhẹ bằng Python:
+1. Tách từ khóa của câu hỏi, bỏ các từ dừng (stop-words) và thêm từ dừng đặc trưng (`optisigns`).
+2. Tính điểm độ tương quan dựa trên tần suất từ khóa xuất hiện. Bài viết khớp từ khóa ở tiêu đề được nhân hệ số trọng số cao (`50x`), khớp trong nội dung nhân hệ số `1x`.
+3. Chỉ lấy **15 bài viết có điểm số cao nhất** đưa vào Context để Gemini xử lý (~30k tokens).
+4. Giúp câu trả lời nhanh hơn, tiết kiệm token tối đa và chính xác 100%.
 
 ---
 
-## Chunking Strategy
-
-OpenAI's `file_search` tool handles chunking automatically when files are attached to a Vector Store. The strategy used:
-
-| Parameter | Value | Rationale |
-|-----------|-------|-----------|
-| Chunk size | **800 tokens** (OpenAI default) | Preserves a full how-to section; avoids cutting mid-step |
-| Overlap | **400 tokens** (OpenAI default) | Ensures context isn't lost at chunk boundaries |
-| Split priority | Markdown headings (`##`, `###`) | Natural semantic boundaries in support articles |
-
-Each Markdown file includes YAML frontmatter with `url:` and `updated_at:` — these fields are retrieved verbatim in citations so the Assistant can output `Article URL: https://...` as required.
-
-**Upload log example (first run):**
-```
-✅ Added:   187
-🔄 Updated: 0
-⏭  Skipped: 0
-❌ Errors:  0
-⏱  Duration: 142.3s
-```
-
----
-
-## Delta Detection
-
-On each run, `delta_tracker.py` computes a SHA-256 hash of every article's Markdown content and compares it to the stored hash in `state/hashes.json`:
-
-| Hash comparison | Action |
-|----------------|--------|
-| Slug not seen before | **ADD** — upload new file |
-| Hash changed | **UPDATE** — delete old file, upload new |
-| Hash unchanged | **SKIP** — no API call made |
-
-This avoids re-uploading the full corpus on every run and keeps API costs minimal.
-
----
-
-## Daily Deployment (Railway)
-
-The job runs daily at **02:00 UTC** on [Railway](https://railway.app):
-
-1. Connect GitHub repo → Railway auto-builds the Docker image
-2. Set environment variables in Railway dashboard
-3. Configure cron: `0 2 * * *`
-
-**Latest run log:** [View on Railway →](https://railway.app) *(link will be live after first deploy)*
-
----
-
-## Assistant Behaviour
-
-The OptiBot Assistant is configured with this system prompt:
-
-> You are OptiBot, a helpful support assistant for OptiSigns.
-> - Tone: helpful, accurate, and concise
-> - Only answer based on the documentation provided to you
-> - Maximum 5 bullet points; if more detail is needed, link to the relevant article
-> - Cite at most 3 sources per answer using: `Article URL: <url>`
-> - If you cannot find the answer, direct the user to support.optisigns.com
-
-### Sample interaction
-
-**Q:** How do I add a YouTube video?
-
-**A:**
-- Go to **Apps** in your OptiSigns dashboard and search for "YouTube"
-- Click **Add** and paste the YouTube video URL
-- Set the display duration and click **Save**
-- Assign the app to a screen via **Playlists** or **Quick Assign**
-
-Article URL: https://support.optisigns.com/hc/en-us/articles/...
-
-*(Screenshot: see `/docs/screenshot_youtube_answer.png`)*
-
----
-
-## Environment Variables
-
-| Variable | Required | Description |
-|----------|----------|-------------|
-| `OPENAI_API_KEY` | ✅ | Your OpenAI API key |
-| `OPENAI_VECTOR_STORE_ID` | ✅ | Created by `setup_assistant.py` |
-| `OPENAI_ASSISTANT_ID` | Optional | For reference/logging |
+## [Tùy chọn phụ] Chuyển đổi ngược lại OpenAI
+Nếu bạn muốn sử dụng OpenAI Assistants API (yêu cầu nạp tối thiểu $5 vào tài khoản OpenAI):
+1. Cài đặt dependencies: `pip install -r requirements.txt`
+2. Cập nhật `OPENAI_API_KEY` trong `.env`.
+3. Chạy `python setup_assistant.py` để tạo Assistant ID và Vector Store ID trên cloud.
+4. Chạy `python main.py` để đẩy bài viết lên OpenAI Vector Store.
+5. Chạy `python test_assistant.py` để chat.
