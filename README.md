@@ -28,7 +28,7 @@ Context (Prompt)  ──>  Google Gemini 2.5 Flash  ──>  Câu trả lời (+
 ```bash
 git clone https://github.com/Duylap-2601/Mini_Chatbot.git
 cd Mini_Chatbot
-pip install -r requirements_gemini.txt
+pip install -r requirements.txt
 ```
 
 ### 3. Cấu hình môi trường
@@ -44,7 +44,7 @@ GOOGLE_API_KEY=AIzaSy...your_gemini_key_here...
 ### 4. Đồng bộ dữ liệu lần đầu (Sync Pipeline)
 Chạy script để tải toàn bộ bài viết từ Help Center về local máy:
 ```bash
-python main_gemini.py
+python main.py
 ```
 - **Lần chạy đầu tiên:** Tải toàn bộ 404 bài viết, chuyển sang Markdown và lưu vào thư mục `articles/`.
 - **Các lần chạy sau:** Chỉ cập nhật/thêm các bài viết có thay đổi nội dung (sử dụng hash SHA-256 để so sánh delta).
